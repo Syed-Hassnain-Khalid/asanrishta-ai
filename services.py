@@ -1,81 +1,88 @@
 import os
 from dotenv import load_dotenv
-from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
-from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain.agents.agent_toolkits import create_sql_agent, SQLDatabaseToolkit
+from langchain.utilities import SQLDatabase
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage
+from langchain.schema import SystemMessage
 from app.models import ConversationMemory
 
+# === Load environment variables ===
 load_dotenv()
 
-# === ENV VARIABLES ===
 AI_API_KEY = os.getenv("AI_API_KEY")
 DB_URL = os.getenv("DB_URL")
 
-# === LLM SETUP ===
+# === LLM (Google Gemini) ===
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash-lite",
-    temperature=0,
+    model="gemini-2.0-flash",  # or gemini-pro if you prefer
+    temperature=0.2,
     verbose=True,
-    google_api_key=AI_API_KEY
+    google_api_key=AI_API_KEY,
 )
 
-# === DATABASE TOOLKIT SETUP ===
+# === Setup SQL Database ===
 db = SQLDatabase.from_uri(DB_URL)
+
+# === Setup SQL Toolkit ===
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
-# === CREATE SQL AGENT ===
+# === Create SQL Agent ===
 agent = create_sql_agent(
     llm=llm,
     toolkit=toolkit,
-    verbose=True
+    verbose=True,
 )
 
-# === SYSTEM PROMPT ===
+# === System Prompt ===
 system_prompt = SystemMessage(
-    content="You are a helpful AI assistant that helps users query and summarize data from their database. "
-            "Always explain your answers clearly and concisely."
+    content=(
+        "You are a helpful AI assistant that helps users query and summarize data from their database. "
+        "Always explain your answers clearly and concisely. "
+        "If the user asks something outside the database, politely say you can only assist with data queries."
+    )
 )
 
-# === LOAD MEMORY FOR USER ===
+# === Helper: Load User Memory ===
 def load_user_memory(user):
-    """Retrieve and format past conversation memory for a specific user."""
-    history = ConversationMemory.objects.filter(user=user).order_by('created_at')
+    """
+    Load previous chat history for a given user from ConversationMemory table.
+    """
+    history = ConversationMemory.objects.filter(user=user).order_by("created_at")
     formatted = "\n".join([
-        f"User: {h.user_input}\nAI: {h.ai_response}"
-        for h in history
+        f"User: {item.user_input}\nAI: {item.ai_response}"
+        for item in history
     ])
     return formatted
 
 
-# === MAIN AGENT FUNCTION ===
+# === Main Function: Ask Database ===
 def ask_database(user, query: str) -> str:
     """
-    Executes the user's query using LangChain SQL Agent with user-specific memory.
-    Stores each query-response pair in the ConversationMemory table.
+    Executes the user's SQL-related query using the LangChain SQL agent.
+    Stores query-response pairs per user for persistent conversation memory.
     """
     try:
-        # Load past conversation context
+        # Get user chat history
         memory_context = load_user_memory(user)
-        full_input = (
+
+        # Combine context + system prompt + new query
+        full_prompt = (
             f"{system_prompt.content}\n\n"
             f"Conversation history:\n{memory_context}\n\n"
             f"User query: {query}"
         )
 
-        # Get agent response
-        response = agent.invoke({"input": full_input})
-        output_text = response.get("output", "No response received.")
+        # Run the agent
+        response = agent.run(full_prompt)
 
-        # Save conversation to persistent memory
+        # Save chat in DB
         ConversationMemory.objects.create(
             user=user,
             user_input=query,
-            ai_response=output_text
+            ai_response=response,
         )
 
-        return output_text
+        return response
 
     except Exception as e:
         return f"Error: {str(e)}"
