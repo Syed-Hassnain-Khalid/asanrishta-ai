@@ -1,5 +1,6 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
+from django.conf import settings
 
 
 class CustomUserManager(BaseUserManager):
@@ -63,3 +64,16 @@ class CustomUser(AbstractUser):
 
     def __str__(self):
         return self.email
+
+class ConversationMemory(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='memories')
+    user_input = models.TextField()
+    ai_response = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.user.email} - {self.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
+    
