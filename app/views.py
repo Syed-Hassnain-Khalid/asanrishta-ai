@@ -9,7 +9,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 import json
-from services import ask_database
+from services import ai_router
 
 User = get_user_model()
 
@@ -78,7 +78,7 @@ class AskDBView(View):
                 return JsonResponse({"error": "No authenticated user or user_id provided"}, status=401)
 
             # ✅ Run query through the agent
-            result = ask_database(user, query)
+            result = ai_router(user, query)
             return JsonResponse({"response": result}, status=200)
 
         except User.DoesNotExist:
