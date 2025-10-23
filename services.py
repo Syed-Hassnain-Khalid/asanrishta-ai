@@ -93,20 +93,47 @@ Current conversation context: {summary}
 
 User query: {input}"""
 
-CHAT_PROMPT = """You are QuizHippo AI, a friendly and knowledgeable assistant for a Rishta (matchmaking) platform.
+# CHAT_PROMPT = """You are QuizHippo AI, a friendly and knowledgeable assistant for a Rishta (matchmaking) platform.
+
+# Your role:
+# - Answer FAQs about the platform features
+# - Provide relationship advice and tips
+# - Help with profile creation guidance
+# - Explain how matching algorithms work
+# - Offer cultural sensitivity and respect
+# - Be warm, supportive, and professional
+
+# Available FAQ Information:
+# {faq_content}
+
+# Conversation Summary: {summary}
+
+# Recent Conversation:
+# {history}
+
+# User: {user_input}
+# AI:"""
+CHAT_PROMPT = """
+You are RishtaMate AI — a caring, respectful, and intelligent assistant for a Rishta (matchmaking) platform.
 
 Your role:
-- Answer FAQs about the platform features
-- Provide relationship advice and tips
-- Help with profile creation guidance
-- Explain how matching algorithms work
-- Offer cultural sensitivity and respect
-- Be warm, supportive, and professional
+- Help users find compatible matches and guide them through the matchmaking process
+- Answer FAQs about profiles, interests, verification, and communication features
+- Explain how AI recommendations and matching algorithms work
+- Give relationship and compatibility guidance with empathy and cultural sensitivity
+- Support users in creating honest and appealing profiles
+- Maintain privacy, respect, and professionalism at all times
 
-Available FAQ Information:
+Tone and Language:
+- Friendly, warm, and supportive
+- Respond **in the same language as the user**, including Roman Urdu or English
+- Respect cultural and family values common in South Asian matchmaking contexts
+
+Available Information:
 {faq_content}
 
-Conversation Summary: {summary}
+Conversation Summary:
+{summary}
 
 Recent Conversation:
 {history}
@@ -114,14 +141,33 @@ Recent Conversation:
 User: {user_input}
 AI:"""
 
-# === Routing Decision Prompt ===
-ROUTING_PROMPT = """Analyze this user query and determine if it requires database access or can be answered conversationally.
 
-Query: "{query}"
+# === Routing Decision Prompt ===
+# ROUTING_PROMPT = """Analyze this user query and determine if it requires database access or can be answered conversationally.
+
+# Query: "{query}"
+
+# Database access is needed for:
+# - Searching/filtering profiles (e.g., "find matches in Lahore", "show me engineers")
+# - Getting statistics (e.g., "how many profiles", "my received interests")
+# - Specific data retrieval (e.g., "show my matches", "list pending requests")
+# - CRUD operations on user data
+
+# Conversational response is sufficient for:
+# - FAQ questions about platform features
+# - Relationship advice or tips
+# - How-to questions about using the app
+# - General conversation
+# - Profile creation guidance
+
+# Respond with ONLY one word: DATABASE or CHAT"""
+
+ROUTING_PROMPT = """
+Analyze this user query (it can be in English, Roman Urdu, or mixed) and determine if it requires database access or can be answered conversationally.
 
 Database access is needed for:
-- Searching/filtering profiles (e.g., "find matches in Lahore", "show me engineers")
-- Getting statistics (e.g., "how many profiles", "my received interests")
+- Searching/filtering profiles (e.g., "find matches in Lahore", "Lahore mein engineers dikhao")
+- Getting statistics (e.g., "how many profiles", "mera received interests kya hain")
 - Specific data retrieval (e.g., "show my matches", "list pending requests")
 - CRUD operations on user data
 
@@ -132,7 +178,9 @@ Conversational response is sufficient for:
 - General conversation
 - Profile creation guidance
 
-Respond with ONLY one word: DATABASE or CHAT"""
+Respond with ONLY one word: DATABASE or CHAT
+"""
+
 
 
 def get_or_create_memory(user_id: int) -> Dict[str, Any]:
@@ -185,8 +233,27 @@ def save_conversation(user, query: str, response: str):
     )
 
 
+# def decide_routing(query: str) -> str:
+#     """Use LLM to intelligently decide routing."""
+#     routing_chain = LLMChain(
+#         llm=llm,
+#         prompt=PromptTemplate(input_variables=["query"], template=ROUTING_PROMPT)
+#     )
+    
+#     try:
+#         decision = routing_chain.run({"query": query}).strip().upper()
+#         return "database" if "DATABASE" in decision else "chat"
+#     except:
+#         # Fallback to keyword matching
+#         db_keywords = [
+#             "find", "search", "show", "list", "filter", "match", "profile",
+#             "how many", "count", "statistics", "database", "query",
+#             "interest", "request", "sent", "received", "pending"
+#         ]
+#         return "database" if any(kw in query.lower() for kw in db_keywords) else "chat"
+
 def decide_routing(query: str) -> str:
-    """Use LLM to intelligently decide routing."""
+    """Use LLM to intelligently decide routing (Roman Urdu supported)."""
     routing_chain = LLMChain(
         llm=llm,
         prompt=PromptTemplate(input_variables=["query"], template=ROUTING_PROMPT)
@@ -195,14 +262,11 @@ def decide_routing(query: str) -> str:
     try:
         decision = routing_chain.run({"query": query}).strip().upper()
         return "database" if "DATABASE" in decision else "chat"
-    except:
-        # Fallback to keyword matching
-        db_keywords = [
-            "find", "search", "show", "list", "filter", "match", "profile",
-            "how many", "count", "statistics", "database", "query",
-            "interest", "request", "sent", "received", "pending"
-        ]
-        return "database" if any(kw in query.lower() for kw in db_keywords) else "chat"
+    except Exception as e:
+        print(f"Routing error: {str(e)}")
+        # If LLM fails, default to chat rather than risking wrong DB access
+        return "chat"
+
 
 
 def create_sql_agent(memory):
