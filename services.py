@@ -1,362 +1,204 @@
 import os
+import re
+import json
 from dotenv import load_dotenv
+from typing import Dict, Any
 from langchain.agents import initialize_agent, AgentType
 from langchain.agents.agent_toolkits import SQLDatabaseToolkit
 from langchain.utilities import SQLDatabase
-from langchain.memory import ConversationBufferMemory
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
-from app.models import ConversationMemory
-from typing import Dict, Any
+from app.models import ConversationMemory  # your Django model
 
-# === Load Environment ===
+# === ENVIRONMENT ===
 load_dotenv()
 AI_API_KEY = os.getenv("AI_API_KEY")
 DB_URL = os.getenv("DB_URL")
 
-# === Setup LLM (Google Gemini) ===
+# === LLM (Gemini) ===
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash",
     temperature=0.3,
-    verbose=True,
     google_api_key=AI_API_KEY,
 )
 
-# === Setup SQL Database ===
+# === SQL AGENT (Toolkit + cached globally) ===
 db = SQLDatabase.from_uri(DB_URL)
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-
-# === User-specific memory storage ===
-user_memories: Dict[int, Dict[str, Any]] = {}
-
-# === Summarization Prompt ===
-summary_prompt = PromptTemplate(
-    input_variables=["history"],
-    template="""Summarize the following conversation concisely, focusing on:
-- Key user preferences and information
-- Important topics discussed
-- Any database queries or results
-- User's relationship goals or requirements
-
-Conversation:
-{history}
-
-Summary:"""
+sql_agent = initialize_agent(
+    tools=toolkit.get_tools(),
+    llm=llm,
+    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=False,
+    handle_parsing_errors=True,
+    max_iterations=8,
+    max_execution_time=45,
 )
 
-# === FAQ Content for Rishta App ===
-RISHTA_FAQ = """
-Common Questions about Our Rishta Platform:
+# === UNIFIED PROMPT — Dynamic intent routing ===
+UNIFIED_PROMPT = """
+You are **RishtaMate AI**, a matchmaking assistant with both relationship knowledge and direct access to a live user database.
 
-**Profile & Registration:**
-- Create detailed profiles with photos, bio, education, profession, and preferences
-- Verify your profile for increased trust
-- Privacy controls to show/hide information
+**Database Information**
+Table: `users`
+Columns: id, first_name, last_name, gender, age, city, cast, height, education, occupation, marital_status, is_active
+Only use `is_active = 1` users.
 
-**Matching & Search:**
-- Advanced filters: age, location, education, profession, religion, sect
-- AI-powered recommendations based on compatibility
-- Save favorite profiles and send interest
+**Your Tasks**
+1. Decide if the query needs **database information** (profiles, matches, filters, user data)
+   or if it’s a **general/FAQ** question (advice, relationship tips, small talk).
+   - If the query clearly asks about people, profiles, searches, or filters → use the SQL tool automatically.
+   - If not, answer conversationally.
+2. Never fabricate results; only use DB when required.
+3. Respond in user’s language ({language}).
+4. Be concise, friendly, and clear.
+5. Respect conversation context and memory summary below.
 
-**Communication:**
-- Send interest requests to profiles you like
-- Chat with matched profiles after mutual acceptance
-- Video call feature for verified members
+**Conversation Context**
+{context_summary}
 
-**Safety & Privacy:**
-- All profiles are moderated
-- Report and block features available
-- Your information is encrypted and secure
-- Control who can see your profile
+**User Query**
+{query}
 
-**Subscription:**
-- Free basic membership with limited features
-- Premium plans for unlimited messaging and advanced search
-- Special family packages available
+Now intelligently decide whether to use DB or just respond naturally.
+Return your final response (not your reasoning).
 """
 
-# === System Prompts ===
-SQL_PROMPT = """You are a helpful AI assistant for a Rishta (marriage/matchmaking) platform.
-You can access the database to help users with:
-- Finding matches based on criteria
-- Viewing profile statistics
-- Checking their received/sent interests
-- Analyzing compatibility data
+# === SUMMARY PROMPT ===
+SUMMARY_PROMPT = """
+Summarize this chat briefly:
+- Key preferences (city, cast, height, etc.)
+- User’s tone (English / Roman Urdu)
+- Main goal
 
-When answering database queries:
-1. Be respectful and maintain privacy
-2. Explain results in a friendly, conversational way
-3. Suggest relevant next steps
+Messages:
+{messages}
 
-Current conversation context: {summary}
-
-User query: {input}"""
-
-# CHAT_PROMPT = """You are QuizHippo AI, a friendly and knowledgeable assistant for a Rishta (matchmaking) platform.
-
-# Your role:
-# - Answer FAQs about the platform features
-# - Provide relationship advice and tips
-# - Help with profile creation guidance
-# - Explain how matching algorithms work
-# - Offer cultural sensitivity and respect
-# - Be warm, supportive, and professional
-
-# Available FAQ Information:
-# {faq_content}
-
-# Conversation Summary: {summary}
-
-# Recent Conversation:
-# {history}
-
-# User: {user_input}
-# AI:"""
-CHAT_PROMPT = """
-You are RishtaMate AI — a caring, respectful, and intelligent assistant for a Rishta (matchmaking) platform.
-
-Your role:
-- Help users find compatible matches and guide them through the matchmaking process
-- Answer FAQs about profiles, interests, verification, and communication features
-- Explain how AI recommendations and matching algorithms work
-- Give relationship and compatibility guidance with empathy and cultural sensitivity
-- Support users in creating honest and appealing profiles
-- Maintain privacy, respect, and professionalism at all times
-
-Tone and Language:
-- Friendly, warm, and supportive
-- Respond **in the same language as the user**, including Roman Urdu or English
-- Respect cultural and family values common in South Asian matchmaking contexts
-
-Available Information:
-{faq_content}
-
-Conversation Summary:
-{summary}
-
-Recent Conversation:
-{history}
-
-User: {user_input}
-AI:"""
-
-
-# === Routing Decision Prompt ===
-# ROUTING_PROMPT = """Analyze this user query and determine if it requires database access or can be answered conversationally.
-
-# Query: "{query}"
-
-# Database access is needed for:
-# - Searching/filtering profiles (e.g., "find matches in Lahore", "show me engineers")
-# - Getting statistics (e.g., "how many profiles", "my received interests")
-# - Specific data retrieval (e.g., "show my matches", "list pending requests")
-# - CRUD operations on user data
-
-# Conversational response is sufficient for:
-# - FAQ questions about platform features
-# - Relationship advice or tips
-# - How-to questions about using the app
-# - General conversation
-# - Profile creation guidance
-
-# Respond with ONLY one word: DATABASE or CHAT"""
-
-ROUTING_PROMPT = """
-Analyze this user query (it can be in English, Roman Urdu, or mixed) and determine if it requires database access or can be answered conversationally.
-
-Database access is needed for:
-- Searching/filtering profiles (e.g., "find matches in Lahore", "Lahore mein engineers dikhao")
-- Getting statistics (e.g., "how many profiles", "mera received interests kya hain")
-- Specific data retrieval (e.g., "show my matches", "list pending requests")
-- CRUD operations on user data
-
-Conversational response is sufficient for:
-- FAQ questions about platform features
-- Relationship advice or tips
-- How-to questions about using the app
-- General conversation
-- Profile creation guidance
-
-Respond with ONLY one word: DATABASE or CHAT
+Short summary:
 """
 
+# === MEMORY MANAGER ===
+class EfficientMemoryManager:
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        self.recent_messages = []
+        self.summary = ""
+        self.language = "english"
+        self.preferences = {}
+
+    def add_exchange(self, user_input: str, ai_response: str):
+        self.recent_messages.append({"user": user_input, "ai": ai_response})
+        self.recent_messages = self.recent_messages[-10:]
+        self.language = self._detect_language(user_input)
+        self._extract_preferences(user_input)
+
+    def _detect_language(self, text: str) -> str:
+        roman_urdu_keywords = ['aap', 'hai', 'mein', 'ka', 'ki', 'dikhao', 'rishta', 'batao', 'chahiye']
+        matches = sum(word in text.lower() for word in roman_urdu_keywords)
+        return "roman_urdu" if matches >= 2 else "english"
+
+    def _extract_preferences(self, text: str):
+        text = text.lower()
+        casts = ['syed', 'sheikh', 'rajput', 'awan', 'arain', 'jat', 'gujjar']
+        cities = ['lahore', 'karachi', 'islamabad', 'rawalpindi', 'faisalabad']
+        for cast in casts:
+            if cast in text:
+                self.preferences['cast'] = cast.capitalize()
+        for city in cities:
+            if city in text:
+                self.preferences['city'] = city.capitalize()
+        height = re.search(r'(\d\.\d+)', text)
+        if height:
+            self.preferences['height'] = height.group(1)
+
+    def get_summary(self, llm) -> str:
+        if self.summary and len(self.recent_messages) < 10:
+            return self.summary
+        try:
+            msg_text = "\n".join([f"User: {m['user']}\nAI: {m['ai']}" for m in self.recent_messages])
+            chain = LLMChain(
+                llm=llm,
+                prompt=PromptTemplate(input_variables=["messages"], template=SUMMARY_PROMPT),
+            )
+            self.summary = chain.invoke({"messages": msg_text})["text"]
+        except Exception as e:
+            print("Summary error:", e)
+            self.summary = "Summary unavailable."
+        return self.summary
+
+    def get_context(self) -> str:
+        parts = []
+        if self.summary:
+            parts.append(f"Summary: {self.summary}")
+        if self.preferences:
+            prefs = ", ".join(f"{k}={v}" for k, v in self.preferences.items())
+            parts.append(f"Prefs: {prefs}")
+        if self.recent_messages:
+            last = " | ".join(f"U:{m['user'][:50]}" for m in self.recent_messages[-3:])
+            parts.append(f"Recent: {last}")
+        return " • ".join(parts) or "New user"
 
 
-def get_or_create_memory(user_id: int) -> Dict[str, Any]:
-    """Get or create memory objects for a specific user."""
+# === MEMORY CACHE ===
+user_memories: Dict[int, EfficientMemoryManager] = {}
+
+def get_memory(user_id: int) -> EfficientMemoryManager:
     if user_id not in user_memories:
-        user_memories[user_id] = {
-            'buffer': ConversationBufferMemory(
-                memory_key="chat_history",
-                return_messages=True,
-                input_key="input",
-                output_key="output"
-            ),
-            'summary': ""
-        }
+        user_memories[user_id] = EfficientMemoryManager(user_id)
     return user_memories[user_id]
 
 
-def load_user_memory(user):
-    """
-    Loads previous conversation history from DB and creates a summary.
-    """
-    memory_obj = get_or_create_memory(user.id)
-    buffer_memory = memory_obj['buffer']
-    
-    # Load past conversations
-    history = ConversationMemory.objects.filter(user=user).order_by("-created_at")[:50]  # Last 50 messages
-    history = reversed(history)  # Chronological order
-    
-    chat_text = ""
-    for item in history:
-        buffer_memory.chat_memory.add_user_message(item.user_input)
-        buffer_memory.chat_memory.add_ai_message(item.ai_response)
-        chat_text += f"User: {item.user_input}\nAI: {item.ai_response}\n\n"
-    
-    # Generate summary if there's history
-    if chat_text.strip():
-        summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
-        summary = summary_chain.run({"history": chat_text})
-        memory_obj['summary'] = summary
-    
-    return memory_obj
-
-
-def save_conversation(user, query: str, response: str):
-    """Save user query and AI response in the database."""
-    ConversationMemory.objects.create(
-        user=user,
-        user_input=query,
-        ai_response=response,
-    )
-
-
-# def decide_routing(query: str) -> str:
-#     """Use LLM to intelligently decide routing."""
-#     routing_chain = LLMChain(
-#         llm=llm,
-#         prompt=PromptTemplate(input_variables=["query"], template=ROUTING_PROMPT)
-#     )
-    
-#     try:
-#         decision = routing_chain.run({"query": query}).strip().upper()
-#         return "database" if "DATABASE" in decision else "chat"
-#     except:
-#         # Fallback to keyword matching
-#         db_keywords = [
-#             "find", "search", "show", "list", "filter", "match", "profile",
-#             "how many", "count", "statistics", "database", "query",
-#             "interest", "request", "sent", "received", "pending"
-#         ]
-#         return "database" if any(kw in query.lower() for kw in db_keywords) else "chat"
-
-def decide_routing(query: str) -> str:
-    """Use LLM to intelligently decide routing (Roman Urdu supported)."""
-    routing_chain = LLMChain(
-        llm=llm,
-        prompt=PromptTemplate(input_variables=["query"], template=ROUTING_PROMPT)
-    )
-    
+# === MAIN EXECUTOR (Dynamic routing, single AI call) ===
+def execute_query(user, query: str) -> str:
     try:
-        decision = routing_chain.run({"query": query}).strip().upper()
-        return "database" if "DATABASE" in decision else "chat"
-    except Exception as e:
-        print(f"Routing error: {str(e)}")
-        # If LLM fails, default to chat rather than risking wrong DB access
-        return "chat"
+        memory = get_memory(user.id)
+        context = memory.get_context()
+        language = memory.language
 
+        final_prompt = UNIFIED_PROMPT.format(context_summary=context, query=query, language=language)
 
+        print(f"\n--- Routing ---\nUser: {user.id} | Lang: {language}\nPrompt built.\n")
 
-def create_sql_agent(memory):
-    """Create SQL agent with memory."""
-    return initialize_agent(
-        tools=toolkit.get_tools(),
-        llm=llm,
-        agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        memory=memory,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=5
-    )
+        # ✅ ONE AI CALL — Gemini internally decides whether to use DB or not
+        result = sql_agent.invoke({"input": final_prompt})
 
-
-def ai_router(user, query: str) -> str:
-    """
-    Main routing function with intelligent decision making and memory.
-    """
-    try:
-        # Load user's memory (includes past conversations and summary)
-        memory_obj = load_user_memory(user)
-        buffer_memory = memory_obj['buffer']
-        conversation_summary = memory_obj['summary']
-        
-        # Decide routing using LLM
-        route = decide_routing(query)
-        
-        if route == "database":
-            # === SQL Agent Mode ===
-            sql_agent = create_sql_agent(buffer_memory)
-            
-            # Add context to the query
-            context_prompt = SQL_PROMPT.format(
-                summary=conversation_summary or "No previous context",
-                input=query
-            )
-            
-            response = sql_agent.run(context_prompt)
-            
+        # Handle structured / plain outputs
+        response = ""
+        if isinstance(result, dict):
+            response = result.get("output") or result.get("text") or str(result)
         else:
-            # === Chat Agent Mode ===
-            # Get recent conversation history
-            recent_messages = buffer_memory.chat_memory.messages[-10:]  # Last 10 messages
-            history_text = "\n".join([
-                f"{'User' if i % 2 == 0 else 'AI'}: {msg.content}" 
-                for i, msg in enumerate(recent_messages)
-            ])
-            
-            # Create chat agent with full context
-            chat_agent = LLMChain(
-                llm=llm,
-                prompt=PromptTemplate(
-                    input_variables=["faq_content", "summary", "history", "user_input"],
-                    template=CHAT_PROMPT
-                ),
-                verbose=True
-            )
-            
-            response = chat_agent.run({
-                "faq_content": RISHTA_FAQ,
-                "summary": conversation_summary or "New conversation",
-                "history": history_text or "No recent messages",
-                "user_input": query
-            })
-        
-        # Save to memory
-        buffer_memory.save_context({"input": query}, {"output": response})
-        save_conversation(user, query, response)
-        
-        # Auto-summarize every 20 messages
-        message_count = len(buffer_memory.chat_memory.messages)
-        if message_count > 0 and message_count % 20 == 0:
-            full_history = "\n".join([
-                f"{'User' if i % 2 == 0 else 'AI'}: {msg.content}"
-                for i, msg in enumerate(buffer_memory.chat_memory.messages)
-            ])
-            
-            summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
-            new_summary = summary_chain.run({"history": full_history})
-            memory_obj['summary'] = new_summary
-        
+            response = str(result)
+
+        # === Update memory + save ===
+        memory.add_exchange(query, response)
+        ConversationMemory.objects.create(user=user, user_input=query, ai_response=response)
+
+        # === Periodic summarization ===
+        if len(memory.recent_messages) >= 10:
+            memory.get_summary(llm)
+
         return response.strip()
-    
+
     except Exception as e:
-        print(f"Error in ai_router: {str(e)}")
-        return f"I apologize, but I encountered an error processing your request. Please try rephrasing your question or contact support if the issue persists."
+        print("Execution error:", e)
+        if any(w in query.lower() for w in ['aap', 'hai', 'mein', 'kya']):
+            return "Maaf karna, kuch masla aagaya. Dobara koshish karein?"
+        return "Sorry, something went wrong. Please try again."
 
 
+# === UTILITIES ===
 def clear_user_memory(user_id: int):
-    """Clear memory for a specific user (useful for logout/cleanup)."""
-    if user_id in user_memories:
-        del user_memories[user_id]
+    user_memories.pop(user_id, None)
+    print(f"🧹 Cleared memory for user {user_id}")
+
+def get_memory_info(user_id: int) -> Dict[str, Any]:
+    if user_id not in user_memories:
+        return {"error": "No memory found"}
+    m = user_memories[user_id]
+    return {
+        "messages": len(m.recent_messages),
+        "language": m.language,
+        "preferences": m.preferences,
+        "has_summary": bool(m.summary),
+    }
