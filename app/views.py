@@ -60,36 +60,62 @@ class LoginView(APIView):
             }
         }, status=status.HTTP_200_OK)
 
+# @method_decorator(csrf_exempt, name='dispatch')
+# class AskDBView(View):
+#     def post(self, request, *args, **kwargs):
+#         try:
+#             body = json.loads(request.body.decode('utf-8'))
+#             query = body.get("query")
+#             user_id = body.get("user_id")
+
+#             if not query:
+#                 return JsonResponse({"error": "No query provided"}, status=400)
+
+#             # ✅ User detection logic
+#             if request.user.is_authenticated:
+#                 user = request.user
+#             elif user_id:
+#                 user = User.objects.get(id=user_id)
+#             else:
+#                 return JsonResponse({"error": "No authenticated user or user_id provided"}, status=401)
+
+#             # ✅ Run query through the agent
+#             result = execute_query(user, query)
+#             return JsonResponse({"response": result}, status=200)
+
+#         except User.DoesNotExist:
+#             return JsonResponse({"error": "User not found"}, status=404)
+#         except Exception as e:
+#             return JsonResponse({"error": str(e)}, status=500)
+
+#     def get(self, request, *args, **kwargs):
+#         return JsonResponse(
+#             {"message": "Use POST with 'query' and 'user_id' to interact with the agent."},
+#             status=200
+#         )
+    
 @method_decorator(csrf_exempt, name='dispatch')
 class AskDBView(View):
     def post(self, request, *args, **kwargs):
         try:
-            body = json.loads(request.body.decode('utf-8'))
+            body = json.loads(request.body.decode("utf-8"))
             query = body.get("query")
             user_id = body.get("user_id")
 
             if not query:
                 return JsonResponse({"error": "No query provided"}, status=400)
 
-            # ✅ User detection logic
             if request.user.is_authenticated:
                 user = request.user
             elif user_id:
                 user = User.objects.get(id=user_id)
             else:
-                return JsonResponse({"error": "No authenticated user or user_id provided"}, status=401)
+                return JsonResponse({"error": "No user found"}, status=401)
 
-            # ✅ Run query through the agent
             result = execute_query(user, query)
             return JsonResponse({"response": result}, status=200)
-
-        except User.DoesNotExist:
-            return JsonResponse({"error": "User not found"}, status=404)
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
 
     def get(self, request, *args, **kwargs):
-        return JsonResponse(
-            {"message": "Use POST with 'query' and 'user_id' to interact with the agent."},
-            status=200
-        )
+        return JsonResponse({"message": "POST with 'query' and 'user_id' to chat."}, status=200)
